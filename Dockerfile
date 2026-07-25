@@ -1,6 +1,8 @@
 FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie
 
-ARG HERMES_REF=v2026.6.5
+# "latest" resolves the newest published GitHub release at build time.
+# Override with any tag/branch/SHA via a Railway service variable to pin.
+ARG HERMES_REF=latest
 ARG HERMES_WEBUI_REF=v0.51.310
 
 ENV PYTHONUNBUFFERED=1 \
@@ -34,9 +36,19 @@ RUN useradd --system --uid 10000 --create-home --home-dir /home/hermes --shell /
 
 WORKDIR /opt/hermes
 
+# Bust the build cache whenever a new Hermes release is published, so a rebuild
+# automatically picks up the latest. Harmless when HERMES_REF is pinned.
+ADD https://api.github.com/repos/NousResearch/hermes-agent/releases/latest /tmp/hermes-agent-release.json
+
 RUN git init . && \
     git remote add origin https://github.com/NousResearch/hermes-agent.git && \
-    (git fetch --depth 1 origin "${HERMES_REF}" || git fetch --depth 1 origin "refs/tags/${HERMES_REF}:refs/tags/${HERMES_REF}") && \
+    REF="${HERMES_REF}"; \
+    if [ "$REF" = "latest" ]; then \
+      REF="$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' /tmp/hermes-agent-release.json | head -n1)"; \
+    fi; \
+    if [ -z "$REF" ]; then REF="v2026.7.20"; echo "WARN: could not resolve latest release; falling back to ${REF}"; fi; \
+    echo "==> Installing hermes-agent @ ${REF}" && \
+    (git fetch --depth 1 origin "${REF}" || git fetch --depth 1 origin "refs/tags/${REF}:refs/tags/${REF}") && \
     git checkout --detach FETCH_HEAD
 
 ENV npm_config_install_links=false
