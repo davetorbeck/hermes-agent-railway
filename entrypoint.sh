@@ -256,6 +256,47 @@ export HERMES_WEBUI_STATE_DIR="${HERMES_HOME}/.hermes/webui"
 # Point hermes-webui at our Hermes Agent install so agent features work
 export HERMES_WEBUI_AGENT_DIR="/opt/hermes"
 
+# Optional: keep the official headless backend running for Hermes Desktop.
+# Railway's public listener remains $PORT; admin/dashboard_proxy.py publishes
+# this loopback service under HERMES_DASHBOARD_MOUNT_PATH with WebSocket support.
+# `--host 0.0.0.0` intentionally engages Hermes' authentication gate even
+# though the public request reaches it through the in-container reverse proxy.
+if [ "${START_HERMES_SERVE:-false}" = "true" ]; then
+  HERMES_SERVE_HOST="${HERMES_SERVE_HOST:-0.0.0.0}"
+  HERMES_SERVE_PORT="${HERMES_SERVE_PORT:-${HERMES_DASHBOARD_PORT}}"
+  HERMES_SERVE_LOG="${HERMES_HOME}/logs/serve.log"
+  HERMES_SERVE_PID_FILE="${HERMES_HOME}/serve.pid"
+
+  start_hermes_serve_watchdog() {
+    local AS_USER=$1
+    set +e
+    while true; do
+      printf '\n--- Starting Hermes serve on %s:%s %s ---\n' \
+        "${HERMES_SERVE_HOST}" "${HERMES_SERVE_PORT}" "$(date)" >> "${HERMES_SERVE_LOG}"
+      if [ -n "${AS_USER}" ]; then
+        gosu "${AS_USER}" /opt/hermes/.venv/bin/hermes serve \
+          --host "${HERMES_SERVE_HOST}" \
+          --port "${HERMES_SERVE_PORT}" \
+          >> "${HERMES_SERVE_LOG}" 2>&1 < /dev/null &
+      else
+        /opt/hermes/.venv/bin/hermes serve \
+          --host "${HERMES_SERVE_HOST}" \
+          --port "${HERMES_SERVE_PORT}" \
+          >> "${HERMES_SERVE_LOG}" 2>&1 < /dev/null &
+      fi
+      local PID=$!
+      echo "${PID}" > "${HERMES_SERVE_PID_FILE}"
+      echo "Hermes serve PID: ${PID} (logs at ${HERMES_SERVE_LOG})"
+      wait "${PID}"
+      local RC=$?
+      echo "[entrypoint] Hermes serve (pid ${PID}) exited with code ${RC}; respawning in 2s" \
+        >> "${HERMES_SERVE_LOG}"
+      rm -f "${HERMES_SERVE_PID_FILE}"
+      sleep 2
+    done
+  }
+fi
+
 # Optional: auto-start the messaging gateway daemon (Telegram/Discord/Slack/email).
 # Default off — users typically configure channel tokens via the WebUI Settings
 # panel first, then redeploy with START_GATEWAY=true.
@@ -310,9 +351,15 @@ start_webui_watchdog() {
 
 if [ "$(id -u)" = "0" ]; then
   chown -R hermes:hermes "${HERMES_HOME}" /opt/hermes-railway 2>/dev/null || true
+  if [ "${START_HERMES_SERVE:-false}" = "true" ]; then
+    start_hermes_serve_watchdog hermes &
+  fi
   start_webui_watchdog hermes &
   exec gosu hermes python3 -m uvicorn admin.app:app --host 0.0.0.0 --port "${PORT}"
 fi
 
+if [ "${START_HERMES_SERVE:-false}" = "true" ]; then
+  start_hermes_serve_watchdog "" &
+fi
 start_webui_watchdog "" &
 exec python3 -m uvicorn admin.app:app --host 0.0.0.0 --port "${PORT}"
